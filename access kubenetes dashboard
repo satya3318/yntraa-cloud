@@ -1,0 +1,17 @@
+1: Check the ServiceAccounts
+$ ./kubectl.exe --kubeconfig my-conf get sa -n kubernetes-dashboard
+NAME                   AGE
+default                3h12m
+kubernetes-dashboard   3h12m
+  
+2: Generate a token
+./kubectl.exe --kubeconfig my-conf -n kubernetes-dashboard create token kubernetes-dashboard
+eyJhbGciOiJSUzI1NiIsImtpZCI6IkI0bm45azlremVmQzZrbFdIZldnQjhNTHJDbk5iWkRXX3gwdTMxeFJvWkUifQ.eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjLmNsdXN0ZXIubG9jYWwiXSwiZXhwIjoxNzgzMzM0MTM1LCJpYXQiOjE3ODMzMzA1MzUsImlzcyI6Imh0dHBzOi8va3ViZXJuZXRlcy5kZWZhdWx0LnN2Yy5jbHVzdGVyLmxvY2FsIiwianRpIjoiMTkwNTk1NzAtMjY5OC00YzAwLWE3ZmItZTcwNWRkNmY4ZDU4Iiwia3ViZXJuZXRlcy5pbyI6eyJuYW1lc3BhY2UiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsInNlcnZpY2VhY2NvdW50Ijp7Im5hbWUiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsInVpZCI6Ijc3YjMxNDIxLWRhZTgtNDQ3Yy05MGVkLWM3ODFjNjAyZThlOCJ9fSwibmJmIjoxNzgzMzMwNTM1LCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6a3ViZXJuZXRlcy1kYXNoYm9hcmQ6a3ViZXJuZXRlcy1kYXNoYm9hcmQifQ.Q9LQjsDD-T0Eh2imWM6e0gIeyGAe4tpcIpJiZaUsdJT2vyjp5ueKhH_JOK1nXRAk7c3aw009iNAT6eZDefXtFl0HCr5pZtMxWdVbb6jCMhFvRqkQ1jWg5uxLvqGG2a0w7rZffukm0z-0Zjy6VhnygAj5yQtix5TtQN4ml73kRNIVo2Xcsh80BS9ElBmzLZVCsqtwzrLrwC8EYdFgqnwN_x-b45mwO9ZY193Dp0_6VQbUcBziHwwsOIQmBNomWz067L0eBImABlu6GHIaSs_W8CXhuIp5_Bydo-P34oQz8TxqKbMhp7nlqa7wm9_ryGZlWUjr1tzam0-L5vMVd223pg
+
+If there's an admin-user ServiceAccount instead, use:
+./kubectl.exe --kubeconfig my-conf -n kubernetes-dashboard create token admin-user
+
+3. Run proxy locally
+./kubectl.exe --kubeconfig my-conf proxy
+
+4. Open this URL in your browser (or use the button above) http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/
