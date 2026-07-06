@@ -15,3 +15,161 @@ If there's an admin-user ServiceAccount instead, use:
 ./kubectl.exe --kubeconfig my-conf proxy
 
 4. Open this URL in your browser (or use the button above) http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/
+
+*****************************************
+
+What happens internally?
+
+Suppose your setup looks like this:
+
+Your Laptop
+    │
+    │ kubectl proxy
+    │
+localhost:8001
+    │
+    │ HTTPS
+    ▼
+Kubernetes API Server
+    │
+    ▼
+Dashboard Service
+
+When you open:
+
+http://127.0.0.1:8001
+
+the request flow is:
+
+Your browser sends the request to localhost:8001.
+The local kubectl proxy process receives it.
+kubectl authenticates to the Kubernetes API Server using the credentials in your kubeconfig.
+The API Server processes the request and returns the response through the proxy.
+What service is started on the client?
+
+Only one process starts:
+
+kubectl proxy
+
+It creates:
+
+A local HTTP server
+Default port: 8001
+Listens only on 127.0.0.1 (localhost)
+
+You can verify it's listening.
+
+On Linux:
+
+netstat -tlnp | grep 8001
+
+On Windows:
+
+netstat -ano | findstr 8001
+
+You'll see something like:
+
+TCP 127.0.0.1:8001 LISTENING
+How does it know where to send requests?
+
+Your kubeconfig contains:
+
+API Server URL
+Client certificate or token
+CA certificate
+
+For example:
+
+clusters:
+- cluster:
+    server: https://192.168.1.10:6443
+
+So the proxy forwards requests to:
+
+localhost:8001
+      │
+      ▼
+https://192.168.1.10:6443
+Why is kubectl proxy useful?
+
+Normally, the Dashboard Service is a ClusterIP service:
+
+NAME                     TYPE
+kubernetes-dashboard     ClusterIP
+
+A ClusterIP is only accessible inside the cluster.
+
+Without the proxy:
+
+Browser
+   │
+   X
+ClusterIP (not reachable)
+
+With the proxy:
+
+Browser
+   │
+localhost:8001
+   │
+kubectl proxy
+   │
+API Server
+   │
+Dashboard Service
+
+The proxy bridges your local machine to the cluster through the API Server.
+
+Does it expose the Dashboard directly?
+
+No. The Dashboard is accessed through the Kubernetes API proxy.
+
+The Dashboard URL is typically:
+
+http://127.0.0.1:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/
+
+Notice the path:
+
+API Server
+    │
+Service
+    │
+Dashboard
+
+The API Server proxies the request to the Dashboard Service.
+
+Is it secure?
+
+Yes.
+
+Uses your kubeconfig credentials.
+Only listens on 127.0.0.1 by default.
+Doesn't expose the Dashboard to other machines.
+Enforces Kubernetes RBAC based on your identity.
+Difference between kubectl proxy and kubectl port-forward
+Feature	kubectl proxy	kubectl port-forward
+Connects to	Kubernetes API Server	A specific Pod or Service
+Uses API Server proxy	Yes	No
+Default port	8001	User chooses (e.g., 8080:443)
+Requires API path	Yes	No
+Common use	Dashboard, API access	Application debugging
+
+For example:
+
+kubectl proxy
+
+Then browse to:
+
+http://127.0.0.1:8001/api/v1/...
+
+Whereas:
+
+kubectl port-forward svc/kubernetes-dashboard 8443:443 -n kubernetes-dashboard
+
+lets you access the Dashboard directly at:
+
+https://127.0.0.1:8443
+
+without going through the API Server proxy.
+
+In summary, kubectl proxy starts a lightweight HTTP server on your local machine that authenticates to the Kubernetes API Server using your kubeconfig and securely proxies your browser's requests to Kubernetes resources, such as the Dashboard. It doesn't install any additional services on your client—it's just the kubectl process acting as a proxy.
