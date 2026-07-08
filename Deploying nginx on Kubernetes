@@ -1,0 +1,458 @@
+# Deploying nginx on Kubernetes (CloudStack CKS) with HAProxy Ingress
+
+This document covers deploying a sample nginx application on a CloudStack
+CKS Kubernetes cluster, exposing it to the internet using the **HAProxy
+Kubernetes Ingress Controller**, and explains the full request flow from
+client to pod.
+
+> **Why HAProxy Ingress and not ingress-nginx?**
+> The community `ingress-nginx` project (`kubernetes/ingress-nginx`) was
+> retired by Kubernetes SIG Network in November 2025, with best-effort
+> maintenance ending in March 2026 — no further releases, bugfixes, or
+> security patches. HAProxy Ingress (`haproxytech/kubernetes-ingress`) is
+> actively maintained and used here instead.
+> Details: https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/
+
+---
+
+## 1. Architecture overview
+
+```
+Internet
+   │
+   ▼
+CloudStack Public IP  (Firewall: allow TCP/443, TCP/80)
+   │
+   ▼
+CloudStack Load Balancer rule
+   public:443 → NodePort 31187  (round robin across worker nodes)
+   public:80  → NodePort 31666  (round robin across worker nodes)
+   │
+   ▼
+Kubernetes Worker Nodes (kube-proxy / iptables-IPVS)
+   │
+   ▼
+HAProxy Ingress Controller pods  (namespace: haproxy-controller)
+   - Terminates TLS
+   - Reads the `Ingress` object to decide routing by Host header
+   │
+   ▼
+Service: web-app-svc (ClusterIP, namespace: web)
+   │
+   ▼
+nginx pods (Deployment: web-app, 3 replicas, namespace: web)
+```
+
+---
+
+## 2. Prerequisites
+
+- A working CKS (or any Kubernetes) cluster, `kubectl` configured against it
+- `helm` installed on a machine with access to the cluster (see §3.1)
+- A CloudStack public IP already associated with the network the cluster's
+  worker nodes are on
+
+---
+
+## 3. Deploy the application
+
+### 3.1 Namespace
+
+```bash
+kubectl create namespace web
+```
+
+### 3.2 Deployment + ConfigMaps
+
+Save as `01-deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: web
+  labels:
+    app: web-app
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: nginx
+        image: nginx:1.27-alpine
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: nginx-conf
+          mountPath: /etc/nginx/conf.d
+          readOnly: true
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
+        - name: nginx-run
+          mountPath: /var/run
+        - name: html
+          mountPath: /usr/share/nginx/html
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 20
+      volumes:
+      - name: nginx-conf
+        configMap:
+          name: web-app-nginx-conf
+      - name: nginx-cache
+        emptyDir: {}
+      - name: nginx-run
+        emptyDir: {}
+      - name: html
+        configMap:
+          name: web-app-html
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-app-nginx-conf
+  namespace: web
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      server_name _;
+      location /healthz {
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+      }
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-app-html
+  namespace: web
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+      <head><title>web-app</title></head>
+      <body><h1>Hello from web-app</h1></body>
+    </html>
+```
+
+> **Note:** no PersistentVolume is used here. `nginx-conf` and `html` are
+> `configMap` volumes (static config injected at mount time); `nginx-cache`
+> and `nginx-run` are `emptyDir` (scratch space, wiped on pod restart). This
+> app is stateless, so no persistent storage is required.
+
+```bash
+kubectl apply -f 01-deployment.yaml
+kubectl -n web rollout status deployment/web-app
+```
+
+### 3.3 Service (ClusterIP)
+
+Save as `02-service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-svc
+  namespace: web
+  labels:
+    app: web-app
+spec:
+  selector:
+    app: web-app
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+  type: ClusterIP
+```
+
+```bash
+kubectl apply -f 02-service.yaml
+```
+
+`ClusterIP` is correct here — the Service only needs to be reachable from
+inside the cluster (by the Ingress controller); it is never exposed
+directly to the internet.
+
+---
+
+## 4. Install the HAProxy Ingress Controller
+
+### 4.1 Install Helm (if not already installed)
+
+```bash
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 700 get_helm.sh
+./get_helm.sh
+helm version
+```
+
+### 4.2 Install the controller
+
+```bash
+helm repo add haproxytech https://haproxytech.github.io/helm-charts
+helm repo update
+
+helm install haproxy-kubernetes-ingress haproxytech/kubernetes-ingress \
+  --namespace haproxy-controller --create-namespace \
+  --set controller.service.type=NodePort
+```
+
+Check what came up:
+
+```bash
+kubectl get pods -n haproxy-controller -o wide
+kubectl get svc haproxy-kubernetes-ingress -n haproxy-controller -o wide
+```
+
+Example output:
+
+```
+NAME                         TYPE       CLUSTER-IP     PORT(S)
+haproxy-kubernetes-ingress   NodePort   10.108.13.115  80:31666/TCP,443:31187/TCP,...
+```
+
+Note the NodePort values assigned for 80 and 443 (`31666` / `31187` in this
+example) — these are cluster-specific and may differ on your install.
+
+### 4.3 Fix the default SSL-redirect port
+
+By default, this controller's `ssl-redirect-port` ConfigMap key is `8443`,
+which produces a `Location: https://<host>:8443/` redirect that doesn't
+match your real external port (typically 443, reached via a NAT/LB in
+front of the controller). Patch it:
+
+```bash
+kubectl patch configmap haproxy-kubernetes-ingress -n haproxy-controller \
+  --type merge -p '{"data":{"ssl-redirect-port":"443"}}'
+```
+
+---
+
+## 5. TLS certificate
+
+The Ingress controller terminates TLS — the nginx pods never handle
+certificates themselves. Create a Secret containing the cert/key that the
+Ingress references:
+
+```bash
+# For testing with a non-public/test hostname, a self-signed cert is fine:
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout privkey.pem -out fullchain.pem \
+  -subj "/CN=app.test.com"
+
+kubectl create secret tls web-app-tls \
+  --cert=fullchain.pem --key=privkey.pem -n web
+```
+
+For a real public domain, use [cert-manager](https://cert-manager.io/) with
+a Let's Encrypt `ClusterIssuer` instead of a self-signed cert (see the
+`cert-manager.io/cluster-issuer` annotation in §6).
+
+---
+
+## 6. Ingress resource
+
+Save as `03-ingress.yaml`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web-app-ingress
+  namespace: web
+  annotations:
+    haproxy-ingress.github.io/ssl-redirect: "true"
+    haproxy-ingress.github.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod   # remove if not using cert-manager
+spec:
+  ingressClassName: haproxy
+  tls:
+  - hosts:
+    - app.test.com
+    secretName: web-app-tls
+  rules:
+  - host: app.test.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: web-app-svc
+            port:
+              number: 80
+```
+
+```bash
+kubectl apply -f 03-ingress.yaml
+kubectl get ingress -n web
+```
+
+---
+
+## 7. Expose to the internet via CloudStack
+
+### 7.1 Firewall rule
+
+Allow inbound TCP/443 (and TCP/80, for the HTTP→HTTPS redirect) on the
+public IP associated with the cluster's network.
+
+### 7.2 Load Balancer rule
+
+Since the HAProxy controller runs multiple replicas across different
+worker nodes, use a CloudStack **Load Balancer** rule (not a single
+port-forwarding rule) so traffic is distributed across all worker node
+IPs on the controller's NodePort:
+
+```bash
+cmk create loadbalancerrule \
+  publicipid=<public-ip-id> \
+  algorithm=roundrobin \
+  name=web-app-https \
+  privateport=31187 \
+  publicport=443 \
+  networkid=<network-id>
+
+cmk assign loadbalancerrule \
+  id=<lb-rule-id> \
+  virtualmachineids=<worker-vm-id-1>,<worker-vm-id-2>
+```
+
+Repeat for port 80 → NodePort 31666 if you want the HTTP redirect path
+reachable too.
+
+### 7.3 Point DNS (or hosts file, for testing) at the public IP
+
+```
+app.test.com  →  <cloudstack-public-ip>
+```
+
+### 7.4 Verify
+
+```bash
+curl -v https://app.test.com/
+```
+
+---
+
+## 8. Request flow — end to end
+
+```
+ 1. Client sends HTTPS request to <public-ip>:443, Host: app.test.com
+        │
+        ▼
+ 2. CloudStack Firewall rule
+        - Allows inbound TCP/443 to reach the network
+        ▼
+ 3. CloudStack Load Balancer rule
+        - Distributes traffic across worker node IPs
+        - Forwards to: <worker-node-ip>:31187 (NodePort)
+        ▼
+ 4. kube-proxy (on the receiving node)
+        - NodePort 31187 is opened on every node by kube-proxy, regardless
+          of which node the Ingress controller pod actually runs on
+        - iptables/IPVS rules forward the packet to a live HAProxy
+          controller pod IP (possibly on a different node)
+        ▼
+ 5. HAProxy Ingress Controller pod
+        - Terminates TLS using the cert from the `web-app-tls` Secret
+        - Reads the `Ingress` object (`web-app-ingress`) to match the
+          Host header (`app.test.com`) to a backend Service
+        - Forwards the decrypted request internally as plain HTTP
+        ▼
+ 6. Service `web-app-svc` (ClusterIP)
+        - A virtual IP; kube-proxy uses its Endpoints/EndpointSlice to
+          pick one of the live nginx pod IPs
+        ▼
+ 7. nginx pod (one of 3 replicas)
+        - Serves the response on containerPort 8080
+        ▼
+ 8. Response travels back up the same path in reverse
+```
+
+### Component responsibilities at a glance
+
+| Layer | Component | Responsibility |
+|---|---|---|
+| Network edge | CloudStack Firewall rule | Allow/deny inbound traffic by port/protocol/CIDR |
+| Network edge | CloudStack Load Balancer rule | Distribute public traffic across worker node IPs |
+| Node | kube-proxy | Implements NodePort routing and Service load balancing via iptables/IPVS |
+| Cluster | HAProxy Ingress Controller | TLS termination, Host/path-based routing, reads `Ingress` objects |
+| Cluster | `Ingress` object | Declarative routing rules (no traffic handling itself) |
+| Cluster | `Service` (ClusterIP) | Stable virtual IP fronting a set of pods |
+| Cluster | `Endpoints`/`EndpointSlice` | Live list of pod IPs backing a Service |
+| Application | nginx pods | Serve the actual HTTP response |
+
+---
+
+## 9. Troubleshooting notes from this deployment
+
+- **`ADDRESS` blank in `kubectl get ingress`**: expected with a `NodePort`
+  Service — there's no single external address to report, since traffic
+  arrives per-node. Not a failure.
+- **Redirect goes to `:8443` instead of `:443`**: fix the controller's
+  `ssl-redirect-port` ConfigMap key (see §4.3).
+- **`curl https://<public-ip>/` returns 404**: expected if the request's
+  `Host` header doesn't match a rule in the `Ingress` (e.g. hitting the
+  raw IP directly, which sets `Host: <ip>`, not `Host: app.test.com`).
+  Test with `curl -H "Host: app.test.com" https://<public-ip>/` before DNS
+  is in place.
+- **No response reaching the node externally**: use `tcpdump -i any port
+  <nodeport> -n` on the node while testing from outside — if no packets
+  arrive, the issue is in the CloudStack firewall/LB/ACL layer, not
+  Kubernetes. If packets arrive but nothing responds, check node-level
+  `iptables`/security groups.
+- **VPC tier networks**: if the cluster's network is a VPC tier rather
+  than an Isolated network, Network ACL rules are required in addition to
+  firewall/port-forwarding rules, since VPC tiers route through ACLs.
