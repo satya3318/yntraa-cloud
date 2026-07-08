@@ -420,6 +420,44 @@ curl -v https://app.test.com/
         ▼
  8. Response travels back up the same path in reverse
 ```
+### Full flow path ###
+1. Browser/client
+       │  HTTPS request to 103.232.25.196:443, Host: app.test.com
+       ▼
+2. CloudStack Public IP (103.232.25.196)
+       │  Firewall rule: allow inbound TCP/443
+       │  Load Balancer rule: public 443 → NodePort 31187, across both worker VMs
+       ▼
+3. CloudStack Load Balancer (virtual router / LB appliance)
+       │  Picks one of the two worker nodes (round robin), forwards to:
+       │  10.1.1.85:31187  or  10.1.1.135:31187
+       ▼
+4. Worker Node — kube-proxy / iptables (or IPVS) rules
+       │  NodePort 31187 is opened on EVERY node by kube-proxy, regardless of
+       │  which node actually runs the HAProxy pod. kube-proxy's iptables/IPVS
+       │  rules intercept traffic hitting 31187 and forward it to one of the
+       │  HAProxy controller pod's actual IPs (even if that pod is running on
+       │  the OTHER node) — this is why NodePort works cluster-wide, not just
+       │  on the node where the pod happens to live.
+       ▼
+5. HAProxy Ingress controller pod (namespace: haproxy-controller)
+       │  - Terminates TLS here (decrypts HTTPS) using the cert from the
+       │    'web-app-tls' Secret (or its fallback self-signed cert, in your
+       │    case, until you create that Secret)
+       │  - Reads the Ingress object 'web-app-ingress' to know:
+       │      Host: app.test.com  →  route to Service 'web-app-svc' on port 80
+       │  - Forwards the now-decrypted request as plain HTTP internally
+       ▼
+6. Kubernetes Service — web-app-svc (ClusterIP 10.110.40.233)
+       │  Doesn't do the routing itself — it's a virtual IP. The actual
+       │  forwarding to real pod IPs is done by kube-proxy again, using the
+       │  Service's Endpoints/EndpointSlice object, which lists the live
+       │  pod IPs backing the 'app=web-app' selector.
+       ▼
+7. One of the 3 web-app pods (chosen via the Service's load balancing)
+       │  nginx listens on containerPort 8080, serves the request
+       ▼
+8. Response travels back up the exact same path in reverse
 
 ### Component responsibilities at a glance
 
