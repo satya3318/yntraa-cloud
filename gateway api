@@ -523,6 +523,9 @@ status:
       sectionName: http
 root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
 
+**** Able to acces the app using gateway API ***
+
+Below are some core concept. 
 
 Programmed: True means the Gateway controller (NGF, in this case) has actually finished the work of turning your Gateway spec into a real, running data-plane — not just validating the YAML.
 What "Accepted" vs "Programmed" actually mean
@@ -545,3 +548,159 @@ yaml- lastTransitionTime: ...
   type: Conflicted
 Conflicted: False is actually the good outcome here — it means there are no conflicts on this listener (the condition name is Conflicted, and its status being False means that condition is not true, i.e. no conflict exists). Also notice attachedRoutes: 0 — that's expected right now since you haven't applied an HTTPRoute yet; that count will go to 1 once you create one.
 Run the two commands above and paste the output — then we'll move on to the HTTPRoute/ReferenceGrant/app deployment steps on this DR cluster.
+
+Good question — same pattern as Accepted/Programmed on the Gateway, but these two conditions live on the HTTPRoute and check a different thing: whether this specific route is valid and whether what it points to actually exists.
+Accepted: True
+The Gateway (public-gateway) has looked at this HTTPRoute and agreed to attach it. This checks things like:
+
+Does the parentRefs entry correctly point to a real Gateway/listener?
+Is the route's sectionName (if specified) a listener that actually exists on that Gateway?
+Does the listener's allowedRoutes policy permit a route from this namespace? (this is why we set from: All earlier — with a stricter value like Same, a route from a different namespace would fail this check)
+No conflicting/duplicate path matches on the same listener
+
+If Accepted: False, the route was rejected outright — traffic will never reach your backend no matter what, because the Gateway isn't even considering this route.
+ResolvedRefs: True
+The Gateway has gone one step further and actually resolved every object this HTTPRoute references — mainly the backendRefs. This checks:
+
+Does the named Service (web-app-svc) actually exist in the specified namespace?
+Does the specified port actually exist on that Service?
+If the Service is in a different namespace than the HTTPRoute, does a valid ReferenceGrant exist permitting that cross-namespace reference?
+
+If ResolvedRefs: False, the route itself was accepted structurally, but the backend it's supposed to send traffic to couldn't be found or isn't permitted — this is exactly what a missing ReferenceGrant or a typo'd Service name/port would cause. You'd typically see a reason like BackendNotFound or RefNotPermitted in the message alongside it.
+Why both matter together
+Both need to be True for traffic to actually flow end-to-end:
+
+Accepted: True + ResolvedRefs: False → Gateway knows about the route, but has nowhere valid to send matching traffic → typically manifests as a 500/503 from NGINX.
+Accepted: False → the route is essentially invisible to the Gateway; requests matching its path won't even reach NGINX's routing logic for this rule at all.
+
+
+*** Conveting http to https ***
+
+Path A — You have a domain pointed at the IP (recommended, real trusted cert)
+1. Point DNS: create an A record for your domain (e.g. app.yourdomain.com) → 103.232.25.197. Verify:
+bashnslookup app.yourdomain.com
+2. Install cert-manager:
+bashhelm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace \
+  --set crds.enabled=true
+3. Create a ClusterIssuer:
+yamlapiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: your-email@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs:
+          - name: public-gateway
+            namespace: nginx-gateway
+bashkubectl apply -f cluster-issuer.yaml
+4. Request the certificate:
+yamlapiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: web-app-tls
+  namespace: nginx-gateway
+spec:
+  secretName: web-app-tls
+  dnsNames:
+  - app.yourdomain.com
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+bashkubectl apply -f certificate.yaml
+kubectl get certificate -n nginx-gateway -w
+Wait for READY: True. Check kubectl describe certificate web-app-tls -n nginx-gateway if it hangs — usually a DNS or port-80-reachability issue.
+
+
+Path B — No domain yet, or internal/testing use (self-signed cert)
+bashopenssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout tls.key -out tls.crt \
+  -subj "/CN=103.232.25.197"
+
+kubectl create secret tls web-app-tls \
+  --cert=tls.crt --key=tls.key \
+  -n nginx-gateway
+Browsers will show a security warning (expected/normal for self-signed) — fine for internal testing, not for production public use.
+
+Steps common to both — add the HTTPS listener and update the route
+5. Add an HTTPS listener to the Gateway:
+yamlapiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: public-gateway
+  namespace: nginx-gateway
+spec:
+  gatewayClassName: nginx
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: web-app-tls
+        kind: Secret
+    allowedRoutes:
+      namespaces:
+        from: All
+# kubectl apply -f gateway.yaml
+
+6. Attach your HTTPRoute to the new https listener too (keep http as well for now, or redirect it — see below):
+yamlapiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web-app-route
+  namespace: web
+spec:
+  parentRefs:
+  - name: public-gateway
+    namespace: nginx-gateway
+    sectionName: http
+  - name: public-gateway
+    namespace: nginx-gateway
+    sectionName: https
+  rules:
+  - backendRefs:
+    - name: web-app-svc
+      port: 80
+
+# kubectl apply -f web-app-route.yaml
+
+7. Verify and test:
+bashkubectl get gateway public-gateway -n nginx-gateway -o yaml   # confirm https listener Programmed: True
+kubectl get svc -n nginx-gateway                              # confirm port 443 now listed
+curl -kv https://103.232.25.197/                               # -k skips cert validation if self-signed
+Optional — force HTTP to redirect to HTTPS
+Once HTTPS works, add a redirect filter so plain http:// visitors get bounced automatically:
+yamlapiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: http-to-https-redirect
+  namespace: web
+spec:
+  parentRefs:
+  - name: public-gateway
+    namespace: nginx-gateway
+    sectionName: http
+  rules:
+  - filters:
+    - type: RequestRedirect
+      requestRedirect:
+        scheme: https
+        statusCode: 301
+# bashkubectl apply -f redirect.yaml
