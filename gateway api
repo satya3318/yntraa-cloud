@@ -1,0 +1,47 @@
+## Step 1 — Install the Gateway API CRDs
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+```
+$ ./kubectl.exe --kubeconfig sm-dr.pri apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+customresourcedefinition.apiextensions.k8s.io/gatewayclasses.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/grpcroutes.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/httproutes.gateway.networking.k8s.io created
+customresourcedefinition.apiextensions.k8s.io/referencegrants.gateway.networking.k8s.io created
+
+
+Verify:
+
+```bash
+kubectl get crds | grep gateway.networking.k8s.io
+```
+$ ./kubectl.exe --kubeconfig sm-dr.pri get crds | grep gateway.networking.k8s.io
+gatewayclasses.gateway.networking.k8s.io                2026-07-09T09:18:42Z
+gateways.gateway.networking.k8s.io                      2026-07-09T09:18:42Z
+grpcroutes.gateway.networking.k8s.io                    2026-07-09T09:18:42Z
+httproutes.gateway.networking.k8s.io                    2026-07-09T09:18:42Z
+referencegrants.gateway.networking.k8s.io               2026-07-09T09:18:42Z
+
+## Step 2 — Install NGINX Gateway Fabric (NGF) via Helm
+
+```bash
+helm install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+  --create-namespace \
+  -n nginx-gateway
+```
+
+Verify the control-plane pod is running:
+
+```bash
+kubectl get pods -n nginx-gateway
+```
+
+Check the auto-created GatewayClass:
+
+```bash
+kubectl get gatewayclass
+```
+Note the exact name shown (commonly `nginx`) — you'll reference it in Step 5.
+
+---
