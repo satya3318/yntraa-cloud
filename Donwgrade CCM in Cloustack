@@ -4,11 +4,21 @@ Fix: pin the CCM image back to 1.1.0
 kubectl get deploy -n kube-system | grep cloud-controller-manager
 kubectl get deploy cloud-controller-manager -n kube-system -o jsonpath='{.spec.template.spec.containers[0].image}'
 
+$ ./kubectl.exe --kubeconfig sm-dr.pri get deploy cloud-controller-manager -n kube-system -o jsonpath='{.spec.template.spec.containers[0].image}'
+apache/cloudstack-kubernetes-provider:v1.2.0
+
 2. Patch the image tag to 1.1.0:
 kubectl set image deployment/cloud-controller-manager \
   -n kube-system \
-  cloud-controller-manager=<registry-path>/cloudstack-ccm:1.1.0
+  cloud-controller-manager=apache/cloudstack-kubernetes-provider:v1.1.0
+
+$ ./kubectl.exe --kubeconfig sm-dr.pri get deploy cloud-controller-manager -n kube-system -o jsonpath='{.spec.template.spec.containers[0].image}'
+apache/cloudstack-kubernetes-provider:v1.1.0
 
 3. Watch it come back up healthy:
 kubectl rollout status deployment/cloud-controller-manager -n kube-system
 kubectl logs -n kube-system -l k8s-app=cloudstack-ccm -f
+
+$ ./kubectl.exe --kubeconfig sm-dr.pri get pods -n kube-system | grep cloud
+cloud-controller-manager-755c4dd6b6-wbdgw                                    1/1     Running   0          50s
+
