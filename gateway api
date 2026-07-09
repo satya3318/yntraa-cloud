@@ -25,23 +25,523 @@ referencegrants.gateway.networking.k8s.io               2026-07-09T09:18:42Z
 
 ## Step 2 — Install NGINX Gateway Fabric (NGF) via Helm
 
+Install help if not installed
+
+# Download the official installation script
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+
+# Grant execute permissions
+chmod 700 get_helm.sh
+
+# Run the script to fetch and install the latest binary
+./get_helm.sh
+
 ```bash
 helm install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
   --create-namespace \
   -n nginx-gateway
 ```
 
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# helm install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+  --create-namespace \
+  -n nginx-gateway
+Pulled: ghcr.io/nginx/charts/nginx-gateway-fabric:2.6.6
+Digest: sha256:f6e155af4804ec5e45de8a793ebfa3af633edcba94f4f02c4c8b5e6bdb9f8ad6
+NAME: ngf
+LAST DEPLOYED: Thu Jul  9 09:51:36 2026
+NAMESPACE: nginx-gateway
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+
+
 Verify the control-plane pod is running:
 
 ```bash
 kubectl get pods -n nginx-gateway
 ```
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get all -n nginx-gateway
+NAME                                            READY   STATUS    RESTARTS   AGE
+pod/ngf-nginx-gateway-fabric-6df7485cc9-f9jsz   1/1     Running   0          32s
+
+NAME                               TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service/ngf-nginx-gateway-fabric   ClusterIP   10.96.197.14   <none>        443/TCP   32s
+
+NAME                                       READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/ngf-nginx-gateway-fabric   1/1     1            1           32s
+
+NAME                                                  DESIRED   CURRENT   READY   AGE
+replicaset.apps/ngf-nginx-gateway-fabric-6df7485cc9   1         1         1       32s
 
 Check the auto-created GatewayClass:
 
 ```bash
 kubectl get gatewayclass
 ```
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get gatewayclass
+NAME    CONTROLLER                                   ACCEPTED   AGE
+nginx   gateway.nginx.org/nginx-gateway-controller   True       62s
+
 Note the exact name shown (commonly `nginx`) — you'll reference it in Step 5.
 
+## Step 3 — Deploy the nginx application
+
+Create a namespace for the app (adjust name as needed):
+
+```bash
+kubectl create namespace web
+```
+
+Create the Deployment. **Important:** stock `nginx:latest` listens on port **80** by default — if you want it on 8080, either change the container/Service ports to 80, or mount a custom config. This example uses port 80 to avoid the mismatch entirely.
+
+```yaml
+# nginx-app.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - name: http
+          containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-svc
+  namespace: web
+  labels:
+    app: web-app
+spec:
+  type: ClusterIP
+  selector:
+    app: web-app
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+```
+
+```bash
+kubectl apply -f nginx-app.yaml
+```
+
+Verify pods and endpoints:
+
+```bash
+kubectl get pods -n web -o wide --show-labels
+kubectl get endpoints web-app-svc -n web
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get pods -n web -o wide --show-labels
+NAME                       READY   STATUS    RESTARTS   AGE    IP                NODE                                              NOMINATED NODE   READINESS GATES   LABELS
+web-app-5944868457-hlh5k   1/1     Running   0          118m   192.168.220.131   ynt-e12586-k8s-1-sm-dr-cluster-node-19f46149b9e   <none>           <none>            app=web-app,pod-template-hash=5944868457
+web-app-5944868457-m826w   1/1     Running   0          118m   192.168.19.133    ynt-e12586-k8s-1-sm-dr-cluster-node-19f4614be64   <none>           <none>            app=web-app,pod-template-hash=5944868457
+web-app-5944868457-xrjtm   1/1     Running   0          118m   192.168.19.134    ynt-e12586-k8s-1-sm-dr-cluster-node-19f4614be64   <none>           <none>            app=web-app,pod-template-hash=5944868457
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get endpoints web-app-svc -n web
+Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice
+NAME          ENDPOINTS                                                      AGE
+web-app-svc   192.168.19.133:8080,192.168.19.134:8080,192.168.220.131:8080   9s
+
+```
+Confirm `ENDPOINTS` is populated (not `<none>`) before moving on.
+
+---
+
+## Step 4 — Confirm NGF's data-plane Service settings
+
+Check the `NginxProxy` custom resource NGF created via Helm:
+
+```bash
+kubectl get nginxproxy -A
+kubectl get nginxproxy <name> -n nginx-gateway -o yaml
+```
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get nginxproxy -A
+NAMESPACE       NAME               AGE
+nginx-gateway   ngf-proxy-config   131m
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get nginxproxy ngf-proxy-config -n nginx-gateway -o yaml
+apiVersion: gateway.nginx.org/v1alpha2
+kind: NginxProxy
+metadata:
+  annotations:
+    meta.helm.sh/release-name: ngf
+    meta.helm.sh/release-namespace: nginx-gateway
+  creationTimestamp: "2026-07-09T09:51:44Z"
+  generation: 1
+  labels:
+    app.kubernetes.io/instance: ngf
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nginx-gateway-fabric
+    app.kubernetes.io/version: 2.6.6
+    helm.sh/chart: nginx-gateway-fabric-2.6.6
+  name: ngf-proxy-config
+  namespace: nginx-gateway
+  resourceVersion: "10943"
+  uid: ce0321b7-0629-47d0-b1e6-d3635b2118cd
+spec:
+  ipFamily: dual
+  kubernetes:
+    deployment:
+      container:
+        image:
+          pullPolicy: IfNotPresent
+          repository: ghcr.io/nginx/nginx-gateway-fabric/nginx
+          tag: 2.6.6
+      replicas: 1
+    service:
+      externalTrafficPolicy: Local
+      type: LoadBalancer
+
+Set the following up front to avoid known issues seen in a previous cluster:
+Set the following up front to avoid known issues seen in a previous cluster:
+
+**a) Use `Cluster` traffic policy** (avoids node-affinity routing gaps when a data-plane pod isn't on the node the CloudStack LB happens to target):
+
+```bash
+kubectl patch nginxproxy ngf-proxy-config -n nginx-gateway --type merge \
+  -p '{"spec":{"kubernetes":{"service":{"externalTrafficPolicy":"Cluster"}}}}'
+```
+
+**b) Run at least 2 data-plane replicas** for resilience:
+
+```bash
+kubectl patch nginxproxy <name> -n nginx-gateway --type merge \
+  -p '{"spec":{"kubernetes":{"deployment":{"replicas":2}}}}'
+```
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get nginxproxy ngf-proxy-config -n nginx-gateway -o yaml
+apiVersion: gateway.nginx.org/v1alpha2
+kind: NginxProxy
+metadata:
+  annotations:
+    meta.helm.sh/release-name: ngf
+    meta.helm.sh/release-namespace: nginx-gateway
+  creationTimestamp: "2026-07-09T09:51:44Z"
+  generation: 3
+  labels:
+    app.kubernetes.io/instance: ngf
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nginx-gateway-fabric
+    app.kubernetes.io/version: 2.6.6
+    helm.sh/chart: nginx-gateway-fabric-2.6.6
+  name: ngf-proxy-config
+  namespace: nginx-gateway
+  resourceVersion: "38909"
+  uid: ce0321b7-0629-47d0-b1e6-d3635b2118cd
+spec:
+  ipFamily: dual
+  kubernetes:
+    deployment:
+      container:
+        image:
+          pullPolicy: IfNotPresent
+          repository: ghcr.io/nginx/nginx-gateway-fabric/nginx
+          tag: 2.6.6
+      replicas: 2
+    service:
+      externalTrafficPolicy: Cluster
+      type: LoadBalancer
+
+## Step 5 — Create the Gateway
+
+```yaml
+# gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: public-gateway
+  namespace: nginx-gateway
+spec:
+  gatewayClassName: nginx   # use the exact name from `kubectl get gatewayclass`
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: All
+```
+
+```bash
+kubectl apply -f gateway.yaml
+```
+
+Wait for the data-plane Deployment + Service to appear:
+
+```bash
+kubectl get pods -n nginx-gateway -o wide
+kubectl get svc -n nginx-gateway
+```
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl apply -f gateway.yaml
+gateway.gateway.networking.k8s.io/public-gateway created
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get pods -n nginx-gateway -o wide
+NAME                                        READY   STATUS            RESTARTS   AGE    IP               NODE                                              NOMINATED NODE   READINESS GATES
+ngf-nginx-gateway-fabric-6df7485cc9-f9jsz   1/1     Running           0          146m   192.168.19.132   ynt-e12586-k8s-1-sm-dr-cluster-node-19f4614be64   <none>           <none>
+public-gateway-nginx-769d9d7994-f8jtx       0/1     Init:0/1          0          3s     <none>           ynt-e12586-k8s-1-sm-dr-cluster-node-19f46149b9e   <none>           <none>
+public-gateway-nginx-769d9d7994-n8sgv       0/1     PodInitializing   0          3s     192.168.19.135   ynt-e12586-k8s-1-sm-dr-cluster-node-19f4614be64   <none>           <none>
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get svc -n nginx-gateway
+NAME                       TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+ngf-nginx-gateway-fabric   ClusterIP      10.96.197.14    <none>        443/TCP        146m
+public-gateway-nginx       LoadBalancer   10.107.25.165   <pending>     80:30887/TCP   8s
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get svc -n nginx-gateway
+NAME                       TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+ngf-nginx-gateway-fabric   ClusterIP      10.96.197.14    <none>        443/TCP        146m
+public-gateway-nginx       LoadBalancer   10.107.25.165   <pending>     80:30887/TCP   10s
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get svc -n nginx-gateway
+NAME                       TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)        AGE
+ngf-nginx-gateway-fabric   ClusterIP      10.96.197.14    <none>           443/TCP        146m
+public-gateway-nginx       LoadBalancer   10.107.25.165   103.232.25.197   80:30887/TCP   12s
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+
+You should see a new `LoadBalancer` type Service (e.g. `public-gateway-nginx`). Wait for `EXTERNAL-IP` to populate — this comes from the CloudStack CCM. If it stays `<pending>`, revisit Step 0.
+
+Confirm the Gateway is programmed:
+
+```bash
+kubectl get gateway public-gateway -n nginx-gateway -o yaml
+```
+Look for `status.conditions` → `Programmed: True`.
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get gateway public-gateway -n nginx-gateway -o yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"gateway.networking.k8s.io/v1","kind":"Gateway","metadata":{"annotations":{},"name":"public-gateway","namespace":"nginx-gateway"},"spec":{"gatewayClassName":"nginx","listeners":[{"allowedRoutes":{"namespaces":{"from":"All"}},"name":"http","port":80,"protocol":"HTTP"}]}}
+  creationTimestamp: "2026-07-09T12:18:28Z"
+  generation: 1
+  name: public-gateway
+  namespace: nginx-gateway
+  resourceVersion: "41105"
+  uid: 7a19b4c4-25cb-4bad-ac1c-9f1c9f2e04e6
+spec:
+  gatewayClassName: nginx
+  listeners:
+  - allowedRoutes:
+      namespaces:
+        from: All
+    name: http
+    port: 80
+    protocol: HTTP
+status:
+  addresses:
+  - type: IPAddress
+    value: 103.232.25.197
+  conditions:
+  - lastTransitionTime: "2026-07-09T12:18:39Z"
+    message: The Gateway is accepted
+    observedGeneration: 1
+    reason: Accepted
+    status: "True"
+    type: Accepted
+  - lastTransitionTime: "2026-07-09T12:18:39Z"
+    message: The Gateway is programmed
+    observedGeneration: 1
+    reason: Programmed
+    status: "True"
+    type: Programmed
+  listeners:
+  - attachedRoutes: 0
+    conditions:
+    - lastTransitionTime: "2026-07-09T12:18:39Z"
+      message: The Listener is programmed
+      observedGeneration: 1
+      reason: Programmed
+      status: "True"
+      type: Programmed
+    - lastTransitionTime: "2026-07-09T12:18:39Z"
+      message: The Listener is accepted
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: Accepted
+    - lastTransitionTime: "2026-07-09T12:18:39Z"
+      message: All references are resolved
+      observedGeneration: 1
+      reason: ResolvedRefs
+      status: "True"
+      type: ResolvedRefs
+    - lastTransitionTime: "2026-07-09T12:18:39Z"
+      message: No conflicts
+      observedGeneration: 1
+      reason: NoConflicts
+      status: "False"
+      type: Conflicted
+    name: http
+    supportedKinds:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+    - group: gateway.networking.k8s.io
+      kind: GRPCRoute
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+
+## Step 6 — Create a ReferenceGrant (if app namespace differs from Gateway namespace)
+
+Since the app lives in `web` and the Gateway lives in `nginx-gateway`, an HTTPRoute needs explicit permission to reference the Service cross-namespace:
+
+```yaml
+# referencegrant.yaml
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gateway-to-web
+  namespace: web
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    namespace: web
+  to:
+  - group: ""
+    kind: Service
+    name: web-app-svc
+```
+
+```bash
+kubectl apply -f referencegrant.yaml
+```
+
+## Step 7 — Create the HTTPRoute
+
+```yaml
+# web-app-route.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web-app-route
+  namespace: web
+spec:
+  parentRefs:
+  - name: public-gateway
+    namespace: nginx-gateway
+  rules:
+  - backendRefs:
+    - name: web-app-svc
+      port: 80
+```
+
+```bash
+kubectl apply -f web-app-route.yaml
+```
+
+Verify it's accepted:
+
+```bash
+kubectl get httproute web-app-route -n web -o yaml
+```
+Look for `Accepted: True` and `ResolvedRefs: True` under `status.parents`.
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl apply -f web-app-route.yaml
+httproute.gateway.networking.k8s.io/web-app-route created
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get httproute -A
+NAMESPACE   NAME            HOSTNAMES   AGE
+web         web-app-route               2s
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get httproute -A
+NAMESPACE   NAME            HOSTNAMES   AGE
+web         web-app-route               3s
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get httproute -A
+NAMESPACE   NAME            HOSTNAMES   AGE
+web         web-app-route               4s
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get httproute web-app-route -n web -o yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"annotations":{},"name":"web-app-route","namespace":"web"},"spec":{"parentRefs":[{"name":"public-gateway","namespace":"nginx-gateway"}],"rules":[{"backendRefs":[{"name":"web-app-svc","port":80}]}]}}
+  creationTimestamp: "2026-07-09T12:23:23Z"
+  generation: 1
+  name: web-app-route
+  namespace: web
+  resourceVersion: "42087"
+  uid: 8d1517d1-0a1e-42c5-a3ed-d231ab5fae5e
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: public-gateway
+    namespace: nginx-gateway
+  rules:
+  - backendRefs:
+    - group: ""
+      kind: Service
+      name: web-app-svc
+      port: 80
+      weight: 1
+    matches:
+    - path:
+        type: PathPrefix
+        value: /
+status:
+  parents:
+  - conditions:
+    - lastTransitionTime: "2026-07-09T12:23:24Z"
+      message: The Route is accepted
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: Accepted
+    - lastTransitionTime: "2026-07-09T12:23:24Z"
+      message: All references are resolved
+      observedGeneration: 1
+      reason: ResolvedRefs
+      status: "True"
+      type: ResolvedRefs
+    controllerName: gateway.nginx.org/nginx-gateway-controller
+    parentRef:
+      group: gateway.networking.k8s.io
+      kind: Gateway
+      name: public-gateway
+      namespace: nginx-gateway
+      sectionName: http
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+
+
+Programmed: True means the Gateway controller (NGF, in this case) has actually finished the work of turning your Gateway spec into a real, running data-plane — not just validating the YAML.
+What "Accepted" vs "Programmed" actually mean
+These are two separate condition checks Gateway API defines, and they happen in sequence:
+Accepted: True — the controller has looked at your Gateway spec and confirmed it's syntactically valid and semantically sensible (valid gatewayClassName, valid listener config, no conflicting ports, etc.). This just means "I understand what you're asking for and I'm willing to try."
+Programmed: True — the controller has gone further and actually provisioned the real infrastructure to make that Gateway work: in NGF's case, this means it has created the data-plane NGINX Deployment and its Service, and that Service has been assigned a real address. This is confirmed by the fact that your output already shows:
+yamlstatus:
+  addresses:
+  - type: IPAddress
+    value: 103.232.25.197
+That's a strong signal a real Service/IP now exists behind this Gateway — which means, unlike a moment ago, the data-plane pod and LoadBalancer Service should now actually be present.
+So — go check now
+bashkubectl get pods -n nginx-gateway -o wide
+kubectl get svc -n nginx-gateway
+You should now see the public-gateway-nginx Deployment/pod and a LoadBalancer type Service with EXTERNAL-IP matching 103.232.25.197.
+One more detail worth noting from your output
+yaml- lastTransitionTime: ...
+  reason: NoConflicts
+  status: "False"
+  type: Conflicted
+Conflicted: False is actually the good outcome here — it means there are no conflicts on this listener (the condition name is Conflicted, and its status being False means that condition is not true, i.e. no conflict exists). Also notice attachedRoutes: 0 — that's expected right now since you haven't applied an HTTPRoute yet; that count will go to 1 once you create one.
+Run the two commands above and paste the output — then we'll move on to the HTTPRoute/ReferenceGrant/app deployment steps on this DR cluster.
