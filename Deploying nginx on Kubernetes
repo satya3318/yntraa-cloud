@@ -558,3 +558,40 @@ Although Kubernetes automatically allocates NodePorts (30332 and 31216), clients
 - **VPC tier networks**: if the cluster's network is a VPC tier rather
   than an Isolated network, Network ACL rules are required in addition to
   firewall/port-forwarding rules, since VPC tiers route through ACLs.
+
+*** From k8s control plane getting 301 but from outside still same issue ***
+
+If the K8S control plane node successfully receives a 301 Moved Permanently redirect via curl but your outside machine still gets an Empty reply from server, the HAProxy configuration inside Kubernetes is officially correct and working.
+
+The issue is that the HTTP (Port 80) traffic from the outside world is being blocked or dropped before it ever reaches HAProxy.
+
+Since HTTPS (Port 443) works from the outside but HTTP (Port 80) fails, the breakdown is happening at your network infrastructure layer. Here are the three most likely root causes and how to fix them in your environment:
+
+Root Cause 1: CloudStack Firewall / Egress Rules are missing Port 80
+When you applied the original Helm chart, it failed because of the UDP protocol rule. When we fixed it, CloudStack successfully provisioned the LoadBalancer IP (103.232.25.186). However, CloudStack might have only opened the firewall mapping for the secure port (443) and left the port 80 rule broken or unapplied.
+
+How to fix:
+
+Log into your CloudStack UI / Dashboard.
+
+Navigate to your Network / Virtual Router / Public IP settings for 103.232.25.186.
+
+Look at the Firewall or Port Forwarding tab.
+
+Verify if there is an explicit rule allowing TCP Port 80 to pass through to the Kubernetes cluster. If it's missing, manually add a port forwarding rule for TCP 80 targeting your K8S nodes.
+
+Root Cause 2: HAProxy External Traffic Policy Drop
+By default, Kubernetes services set externalTrafficPolicy: Cluster. However, depending on how your CloudStack CNI (Network plugin) interacts with the nodes, it might be dropping unencrypted packets arriving on the NodePort mapped to port 80.
+
+You can try forcing HAProxy to preserve the source routing layout. Run a Helm upgrade to set the traffic policy to Local:
+
+
+helm upgrade haproxy-ingress haproxytech/kubernetes-ingress \
+  --namespace haproxy-controller \
+  --set controller.service.type=LoadBalancer \
+  --set controller.service.enablePorts.quic=false \
+  --set controller.service.enablePorts.stat=false \
+  --set controller.service.enablePorts.admin=false \
+  --set-string controller.config.ssl-redirect="true" \
+  --set-string controller.config.ssl-redirect-code="301" \
+  --set controller.service.externalTrafficPolicy=Local
