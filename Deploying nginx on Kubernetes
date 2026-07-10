@@ -243,10 +243,22 @@ helm version
 helm repo add haproxytech https://haproxytech.github.io/helm-charts
 helm repo update
 
+** To create Nodeport service type on bare-metal **
 helm install haproxy-kubernetes-ingress haproxytech/kubernetes-ingress \
   --namespace haproxy-controller --create-namespace \
   --set controller.service.type=NodePort
 ```
+** To create Loadbalance service type on Cloud **
+helm install haproxy-ingress haproxytech/kubernetes-ingress \
+  --create-namespace \
+  --namespace haproxy-controller
+
+helm install haproxy-ingress haproxytech/kubernetes-ingress \
+  --namespace haproxy-controller \
+  --set controller.service.type=LoadBalancer \
+  --set controller.service.enablePorts.quic=false \
+  --set controller.service.enablePorts.stat=false \
+  --set controller.service.enablePorts.admin=false
 
 Check what came up:
 
@@ -473,6 +485,58 @@ curl -v https://app.test.com/
 | Application | nginx pods | Serve the actual HTTP response |
 
 ---
+
+***** Request flow when ingress is configured as LoadBalancer service ******
+
+                Internet Client
+                      |
+                      |  http://app.test.com
+                      |
+                      v
+           Public IP: 103.232.25.186
+        (CloudStack Load Balancer created by CCM)
+                      |
+                      | Forwards to NodePort
+                      |
+        +-------------+--------------+
+        |                            |
+        v                            v
+ Worker Node 1                 Worker Node 2
+ 30332 / 31216                 30332 / 31216
+        |                            |
+        +-------------+--------------+
+                      |
+                      v
+        HAProxy Ingress Pods
+        (2 replicas running)
+                      |
+      Reads Ingress rules:
+      Host: app.test.com
+      Path: /
+                      |
+                      v
+        Service: web-app-svc (ClusterIP)
+        10.105.32.113:80
+                      |
+            kube-proxy / iptables
+                      |
+        +-------------+-------------+
+        |             |             |
+        v             v             v
+ web-app Pod1   web-app Pod2   web-app Pod3
+
+Since your HAProxy Ingress Service is of type LoadBalancer, the request flow is different from a NodePort-based Ingress.
+
+Your HAProxy Service is:
+
+Service: haproxy-ingress-kubernetes-ingress
+Type: LoadBalancer
+External IP: 103.232.25.186
+Ports:
+  80  -> 30332 (NodePort)
+  443 -> 31216 (NodePort)
+
+Although Kubernetes automatically allocates NodePorts (30332 and 31216), clients on the Internet do not use them directly. The external load balancer created by your cloud provider (in your case, Apache CloudStack through its Cloud Controller Manager) forwards traffic to those NodePorts.
 
 ## 9. Troubleshooting notes from this deployment
 
