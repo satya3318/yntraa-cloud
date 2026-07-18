@@ -1,0 +1,62 @@
+Step 1: Verify etcd is running
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get pods -n kube-system | grep etcd
+etcd-ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d                      1/1     Running     0          9d
+etcd-ynt-e12586-k8s-1-sm-dr-cluster-control-19f461454a2                      1/1     Running     0          9d
+etcd-ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614783c                      1/1     Running     0          9d
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~#
+
+Step 2: Check server version
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl -n kube-system describe pod $(kubectl get pods -n kube-system | grep etcd | awk '{print $1}') | grep Image:
+    Image:         registry.k8s.io/etcd:3.6.8-0
+    Image:         registry.k8s.io/etcd:3.6.8-0
+    Image:         registry.k8s.io/etcd:3.6.8-0
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:~# kubectl get pods -n kube-system | grep etcd | awk '{print $1}'
+
+Step 3: Check if the same version etcd tool is available if not then download latest version in same major version
+
+https://github.com/etcd-io/etcd/releases
+export verion
+ETCD_VER=v3.6.13
+
+# choose either URL
+GOOGLE_URL=https://storage.googleapis.com/etcd
+GITHUB_URL=https://github.com/etcd-io/etcd/releases/download
+DOWNLOAD_URL=${GOOGLE_URL}
+
+rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+rm -rf /tmp/etcd-download-test && mkdir -p /tmp/etcd-download-test
+
+curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download-test --strip-components=1 --no-same-owner
+rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+
+cp /tmp/etcd-download-test/etcdctl version /usr/loca/bin
+
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:/tmp/etcd-download-test# etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint health
+https://127.0.0.1:2379 is healthy: successfully committed proposal: took = 6.899573ms
+
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:/tmp/etcd-download-test# etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key member list -w table
++------------------+---------+----------------------------------------------------+-------------------------+-------------------------+------------+
+|        ID        | STATUS  |                        NAME                        |       PEER ADDRS        |      CLIENT ADDRS       | IS LEARNER |
++------------------+---------+----------------------------------------------------+-------------------------+-------------------------+------------+
+| 42e50bced299c24c | started | ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614783c | https://10.1.1.221:2380 | https://10.1.1.221:2379 |      false |
+| 5b7442e265a770ec | started | ynt-e12586-k8s-1-sm-dr-cluster-control-19f461454a2 |  https://10.1.1.62:2380 |  https://10.1.1.62:2379 |      false |
+| 8be196058ef1e048 | started | ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d | https://10.1.1.211:2380 | https://10.1.1.211:2379 |      false |
++------------------+---------+----------------------------------------------------+-------------------------+-------------------------+------------+
+
+root@ynt-e12586-k8s-1-sm-dr-cluster-control-19f4614313d:/tmp/etcd-download-test# etcdctl \
+--endpoints=https://10.1.1.211:2379,https://10.1.1.62:2379,https://10.1.1.221:2379 \
+--cacert=/etc/kubernetes/pki/etcd/ca.crt \
+--cert=/etc/kubernetes/pki/etcd/server.crt \
+--key=/etc/kubernetes/pki/etcd/server.key \
+endpoint status -w table
++-------------------------+------------------+---------+-----------------+---------+--------+-----------------------+--------+-----------+------------+-----------+------------+--------------------+--------+--------------------------+-------------------+
+|        ENDPOINT         |        ID        | VERSION | STORAGE VERSION | DB SIZE | IN USE | PERCENTAGE NOT IN USE | QUOTA  | IS LEADER | IS LEARNER | RAFT TERM | RAFT INDEX | RAFT APPLIED INDEX | ERRORS | DOWNGRADE TARGET VERSION | DOWNGRADE ENABLED |
++-------------------------+------------------+---------+-----------------+---------+--------+-----------------------+--------+-----------+------------+-----------+------------+--------------------+--------+--------------------------+-------------------+
+| https://10.1.1.211:2379 | 8be196058ef1e048 |   3.6.8 |           3.6.0 |   13 MB | 4.8 MB |                   65% | 2.1 GB |      true |      false |         2 |    4025956 |            4025956 |        |                          |             false |
+|  https://10.1.1.62:2379 | 5b7442e265a770ec |   3.6.8 |           3.6.0 |   12 MB | 4.8 MB |                   61% | 2.1 GB |     false |      false |         2 |    4025956 |            4025956 |        |                          |             false |
+| https://10.1.1.221:2379 | 42e50bced299c24c |   3.6.8 |           3.6.0 |   12 MB | 4.8 MB |                   61% | 2.1 GB |     false |      false |         2 |    4025956 |            4025956 |        |                          |             false |
++-------------------------+------------------+---------+-----------------+---------+--------+-----------------------+--------+-----------+------------+-----------+------------+--------------------+--------+--------------------------+-------------------+
